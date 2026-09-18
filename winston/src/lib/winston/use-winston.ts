@@ -8,7 +8,8 @@ import {
   syncSpecsFolder,
 } from "./actions";
 import { isReadableSpecFile, isMaybeSpecFile } from "./drive-parse";
-import { foldHeard, isHandsFreeCommand, parseIntent, spokenList, stripWake } from "./intent";
+import { batchLabel, needsFor, stepsFor, takeBatchFromQuery, type BatchSize } from "./batch";
+import { foldHeard, isHandsFreeCommand, isRecipeAsk, parseIntent, spokenList, stripWake } from "./intent";
 import { measurePhoto, preparePhoto, splitIntoHalves } from "./image";
 import {
   bestTranscript,
@@ -57,7 +58,7 @@ function browserSpeak(text: string): Promise<void> {
 }
 
 const SHEET_HINT =
-  "a kitchen spec sheet. The Process column is the steps. Title from the product name. Shelf life and production time go in time or notes. Extract only what is in this image.";
+  "a kitchen spec sheet. The Process column is the steps. Title from the product name. If there are 1/2, Full, and 2x columns, ingredients and steps are the FULL column only. Put 1/2 and 2x in ingredientsHalf/stepsHalf and ingredientsDouble/stepsDouble. Shelf life and production time go in time or notes. Extract only what is in this image.";
 
 function clipSpeech(text: string, max = 1400) {
   if (text.length <= max) return text;
@@ -121,6 +122,10 @@ function specFromExtracted(
     ingredients: extracted.ingredients,
     materials: extracted.materials,
     steps: extracted.steps,
+    ingredientsHalf: extracted.ingredientsHalf,
+    ingredientsDouble: extracted.ingredientsDouble,
+    stepsHalf: extracted.stepsHalf,
+    stepsDouble: extracted.stepsDouble,
     notes: extracted.notes,
     spokenIntro: extracted.spokenIntro,
     updatedAt: Date.now(),
@@ -188,6 +193,8 @@ export function useWinston() {
   const activeRef = useRef(active);
   const stepRef = useRef(stepIndex);
   const readingRef = useRef(reading);
+  const batchRef = useRef<BatchSize>("full");
+  const pendingBatch = useRef<BatchSize>("full");
   const libraryRef = useRef(library);
   const skipSave = useRef(true);
   const driveFilesRef = useRef(driveFiles);
@@ -322,7 +329,7 @@ export function useWinston() {
           result = await Promise.race([
             speakText({ data: { text: cleaned } }),
             new Promise<{ ok: false; error: string }>((resolve) => {
-              setTimeout(() => resolve({ ok: false, error: "timeout" }), 22_000);
+              setTimeout(() => resolve({ ok: false, error: "timeout" }), 12_000);
             }),
           ]);
           if (result.ok) break;
@@ -357,8 +364,8 @@ export function useWinston() {
         if (speakGen.current === id) await browserSpeak(cleaned);
       } finally {
         if (speakGen.current !== id) return;
-        ignoreUntil.current = Date.now() + 800;
-        await sleep(500);
+        ignoreUntil.current = Date.now() + 350;
+        await sleep(120);
         if (speakGen.current !== id) return;
         pauseRec.current = false;
         resumeEar();
@@ -391,6 +398,7 @@ export function useWinston() {
   const returnHome = useCallback(
     async (line?: string) => {
       pendingPicks.current = [];
+      batchRef.current = "full";
       setActive(null);
       setReading("intro");
       setStepIndex(0);
@@ -406,7 +414,8 @@ export function useWinston() {
   );
 
   const openSpec = useCallback(
-    async (spec: Spec, mode: SpeakMode) => {
+    async (spec: Spec, mode: SpeakMode, batch: BatchSize = "full") => {
+      batchRef.current = batch;
       setActive(spec);
       setStepIndex(0);
       setReading("intro");
@@ -416,17 +425,19 @@ export function useWinston() {
         setStatusLine("Say Hey Winston, then the name. Or say next.");
         return;
       }
-      const needs = spec.kind === "recipe" ? spec.ingredients : spec.materials;
+      const needs = needsFor(spec, batchRef.current);
+      const steps = stepsFor(spec, batchRef.current);
+      const scaleNote = batchRef.current === "full" ? "" : ` ${batchLabel(batchRef.current)}.`;
       if (needs.length > 0) {
         setReading("ingredients");
-        await speak(`You'll need: ${needs.join(". ")}. Say next when you're ready for step one.`);
+        await speak(`You'll need${scaleNote}: ${needs.join(". ")}.`);
         setStatusLine("Say next, repeat, or stop.");
         setPhase("awaiting");
         return;
       }
       setReading("step");
-      await speak(`Step 1 of ${spec.steps.length}. ${spec.steps[0]}.${spec.steps.length <= 1 ? " That's everything." : ""}`);
-      if (spec.steps.length <= 1) {
+      await speak(`Step 1 of ${steps.length}. ${steps[0]}.${steps.length <= 1 ? " That's everything." : ""}`);
+      if (steps.length <= 1) {
         await returnHome();
         return;
       }
@@ -481,22 +492,57 @@ export function useWinston() {
     if (!spec) return;
     const readingNow = readingRef.current;
     const idx = stepRef.current;
+    const needs = needsFor(spec, batchRef.current);
+    const steps = stepsFor(spec, batchRef.current);
     if (readingNow === "intro") {
       await speak(spec.spokenIntro);
     } else if (readingNow === "ingredients") {
-      const needs = spec.kind === "recipe" ? spec.ingredients : spec.materials;
       await speak(
         `${spec.kind === "recipe" ? "Ingredients" : "What you need"}: ${needs.join(". ")}.`,
       );
     } else {
-      const step = spec.steps[idx];
+      const step = steps[idx];
       if (step) {
-        await speak(`Step ${idx + 1} of ${spec.steps.length}. ${step}.`);
+        await speak(`Step ${idx + 1} of ${steps.length}. ${step}.`);
       }
     }
     setStatusLine("Say next, repeat, or stop.");
     setPhase("awaiting");
   }, [speak]);
+
+  const applyBatch = useCallback(
+    async (batch: BatchSize) => {
+      const spec = activeRef.current;
+      if (!spec) {
+        await speakAndWait(
+          "Nothing is open. Ask me for a recipe first.",
+          "listening",
+          "Listening for Hey Winston.",
+        );
+        return;
+      }
+      batchRef.current = batch;
+      setStepIndex(0);
+      const needs = needsFor(spec, batch);
+      const steps = stepsFor(spec, batch);
+      if (needs.length > 0) {
+        setReading("ingredients");
+        await speak(`${batchLabel(batch)}. You'll need: ${needs.join(". ")}.`);
+        setPhase("awaiting");
+        return;
+      }
+      setReading("step");
+      await speak(
+        `${batchLabel(batch)}. Step 1 of ${steps.length}. ${steps[0]}.${steps.length <= 1 ? " That's everything." : ""}`,
+      );
+      if (steps.length <= 1) {
+        await returnHome();
+        return;
+      }
+      setPhase("awaiting");
+    },
+    [returnHome, speak, speakAndWait],
+  );
 
   const goNext = useCallback(async () => {
     const spec = activeRef.current;
@@ -508,18 +554,19 @@ export function useWinston() {
       );
       return;
     }
+    const needs = needsFor(spec, batchRef.current);
+    const steps = stepsFor(spec, batchRef.current);
     if (readingRef.current === "intro") {
-      const needs = spec.kind === "recipe" ? spec.ingredients : spec.materials;
       if (needs.length > 0) {
         setReading("ingredients");
-        await speak(`You'll need: ${needs.join(". ")}. Say next for step one.`);
+        await speak(`You'll need: ${needs.join(". ")}.`);
         setPhase("awaiting");
         return;
       }
       setReading("step");
       setStepIndex(0);
-      await speak(`Step 1 of ${spec.steps.length}. ${spec.steps[0]}.${spec.steps.length <= 1 ? " That's everything." : ""}`);
-      if (spec.steps.length <= 1) {
+      await speak(`Step 1 of ${steps.length}. ${steps[0]}.${steps.length <= 1 ? " That's everything." : ""}`);
+      if (steps.length <= 1) {
         await returnHome();
         return;
       }
@@ -529,8 +576,8 @@ export function useWinston() {
     if (readingRef.current === "ingredients") {
       setReading("step");
       setStepIndex(0);
-      await speak(`Step 1 of ${spec.steps.length}. ${spec.steps[0]}.${spec.steps.length <= 1 ? " That's everything." : ""}`);
-      if (spec.steps.length <= 1) {
+      await speak(`Step 1 of ${steps.length}. ${steps[0]}.${steps.length <= 1 ? " That's everything." : ""}`);
+      if (steps.length <= 1) {
         await returnHome();
         return;
       }
@@ -538,14 +585,14 @@ export function useWinston() {
       return;
     }
     const next = stepRef.current + 1;
-    if (next >= spec.steps.length) {
+    if (next >= steps.length) {
       await returnHome("That's everything.");
       return;
     }
     setStepIndex(next);
-    const last = next + 1 >= spec.steps.length;
+    const last = next + 1 >= steps.length;
     await speak(
-      `Step ${next + 1} of ${spec.steps.length}. ${spec.steps[next]}.${last ? " That's everything." : ""}`,
+      `Step ${next + 1} of ${steps.length}. ${steps[next]}.${last ? " That's everything." : ""}`,
     );
     if (last) {
       await returnHome();
@@ -557,15 +604,16 @@ export function useWinston() {
   const goBack = useCallback(async () => {
     const spec = activeRef.current;
     if (!spec) return;
+    const needs = needsFor(spec, batchRef.current);
+    const steps = stepsFor(spec, batchRef.current);
     if (readingRef.current === "step" && stepRef.current > 0) {
       const prev = stepRef.current - 1;
       setStepIndex(prev);
-      await speak(`Step ${prev + 1} of ${spec.steps.length}. ${spec.steps[prev]}.`);
+      await speak(`Step ${prev + 1} of ${steps.length}. ${steps[prev]}.`);
       setPhase("awaiting");
       return;
     }
     if (readingRef.current === "step") {
-      const needs = spec.kind === "recipe" ? spec.ingredients : spec.materials;
       if (needs.length > 0) {
         setReading("ingredients");
         await speak(
@@ -579,14 +627,16 @@ export function useWinston() {
   }, [readCurrent, speak]);
 
   const lookup = useCallback(
-    async (query: string, kindHint?: Spec["kind"]) => {
-      setPhase("thinking");
-      setStatusLine(`Looking up ${query}…`);
-      const localHits = findSpecs(libraryRef.current, query, kindHint);
+    async (query: string, kindHint?: Spec["kind"], silentIfMissing = false) => {
+      const parsed = takeBatchFromQuery(query);
+      const q = parsed.query || query;
+      pendingBatch.current = parsed.batch ?? "full";
+      const localHits = findSpecs(libraryRef.current, q, kindHint);
 
       if (localHits.length === 1) {
-        await openSpec(localHits[0], "auto");
-        return;
+        setStatusLine(localHits[0].title);
+        await openSpec(localHits[0], "auto", pendingBatch.current);
+        return true;
       }
       if (localHits.length > 1) {
         pendingPicks.current = localHits;
@@ -599,38 +649,19 @@ export function useWinston() {
           "Say the number or the name.",
         );
         armCapture();
-        return;
+        return true;
       }
 
-      const files = driveFilesRef.current.filter((f) => {
-        const words = query
-          .toLowerCase()
-          .split(/\s+/)
-          .filter((w) => w.length > 2);
-        const hay = prettyFileName(f.name).toLowerCase();
-        return !f.isFolder && words.some((w) => hay.includes(w) || f.name.toLowerCase().includes(w));
-      });
-
-      const pick = files[0] ?? (driveFilesRef.current.filter((f) => !f.isFolder).length === 1
-        ? driveFilesRef.current.find((f) => !f.isFolder)
-        : undefined);
-
-      if (pick) {
-        setStatusLine(`Reading ${pick.name} from Specs…`);
-        const spec = await ingestDriveFile(pick);
-        if (spec) {
-          await openSpec(spec, "auto");
-          return;
-        }
-      }
+      if (silentIfMissing) return false;
 
       await speakAndWait(
-        `I don't have ${query} in Specs yet. Add a photo of it, or check that it's in your Drive Specs folder.`,
+        `I don't have ${q} yet. Add a photo of it.`,
         "listening",
         "Listening for Hey Winston.",
       );
+      return false;
     },
-    [armCapture, ingestDriveFile, openSpec, speakAndWait],
+    [armCapture, openSpec, speakAndWait],
   );
 
   const handleUtterance = useCallback(
@@ -693,7 +724,7 @@ export function useWinston() {
           const chosen = pickFromList(pendingPicks.current, text);
           if (chosen) {
             pendingPicks.current = [];
-            await openSpec(chosen, "auto");
+            await openSpec(chosen, "auto", pendingBatch.current);
             return;
           }
           const numbered = pendingPicks.current
@@ -711,6 +742,7 @@ export function useWinston() {
         if (intent.type === "command") {
           if (intent.command === "stop") {
             stopAudio();
+            batchRef.current = "full";
             setActive(null);
             setPhase("listening");
             setStatusLine("Listening for Hey Winston.");
@@ -747,18 +779,47 @@ export function useWinston() {
             if (!activeRef.current) return;
             setReading("intro");
             setStepIndex(0);
-            await openSpec(activeRef.current, "auto");
+            await openSpec(activeRef.current, "auto", batchRef.current);
+            return;
+          }
+          if (intent.command === "half") {
+            await applyBatch("half");
+            return;
+          }
+          if (intent.command === "double") {
+            await applyBatch("double");
+            return;
+          }
+          if (intent.command === "full-batch") {
+            await applyBatch("full");
             return;
           }
         }
 
         if (intent.type === "lookup") {
-          await lookup(intent.query, intent.kindHint);
+          const silent = !fromTyped && !isRecipeAsk(intent.query);
+          const found = await lookup(intent.query, intent.kindHint, silent);
+          if (!found && silent) {
+            if (capturing) {
+              setPhase("capturing");
+              setStatusLine("Listening.");
+              armCapture();
+            } else {
+              setPhase("listening");
+              setStatusLine("Listening for Hey Winston.");
+            }
+          }
           return;
         }
 
         if (capturing && text.length >= 2) {
-          await lookup(text);
+          const silent = !isRecipeAsk(text);
+          const found = await lookup(text, undefined, silent);
+          if (!found && silent) {
+            setPhase("capturing");
+            setStatusLine("Listening.");
+            armCapture();
+          }
         }
       } finally {
         handling.current = false;
@@ -769,6 +830,7 @@ export function useWinston() {
       clearCapture,
       goBack,
       goNext,
+      applyBatch,
       listSpeech,
       lookup,
       openSpec,
@@ -804,9 +866,9 @@ export function useWinston() {
       const phraseNow = holdBuf.current;
       const woke = stripWake(phraseNow).woke;
       const shortCommand =
-        /^(next|repeat|stop|back|ingredients)[.!?]*$/i.test(finalText.trim()) &&
+        /^(next|repeat|stop|back|ingredients|half|double|full)[.!?]*$/i.test(finalText.trim()) &&
         Boolean(activeRef.current);
-      const delay = shortCommand ? 60 : woke && stripWake(phraseNow).rest.length > 1 ? 200 : 400;
+      const delay = shortCommand ? 40 : woke && stripWake(phraseNow).rest.split(/\s+/).filter(Boolean).length >= 2 ? 70 : woke ? 120 : 220;
       holdTimer.current = window.setTimeout(() => {
         const phrase = holdBuf.current.trim();
         holdBuf.current = "";

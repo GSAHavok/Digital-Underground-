@@ -15,6 +15,9 @@ const HANDS_FREE: VoiceCommand[] = [
   "stop",
   "ingredients",
   "start-over",
+  "half",
+  "double",
+  "full-batch",
 ];
 
 const COMMANDS: { re: RegExp; command: VoiceCommand }[] = [
@@ -37,6 +40,18 @@ const COMMANDS: { re: RegExp; command: VoiceCommand }[] = [
   {
     re: /^(ingredients|what do i need)[.!?]*$/i,
     command: "ingredients",
+  },
+  {
+    re: /^(half(?:\s*(?:batch|recipe|size))?|one half|1\s*\/\s*2|the half)[.!?]*$/i,
+    command: "half",
+  },
+  {
+    re: /^(double(?:\s*(?:batch|recipe|size))?|two times|2\s*x|2x|twice)[.!?]*$/i,
+    command: "double",
+  },
+  {
+    re: /^(full(?:\s*(?:batch|recipe|size))?|standard|regular(?:\s*batch)?)[.!?]*$/i,
+    command: "full-batch",
   },
   {
     re: /^(start over|from the beginning)[.!?]*$/i,
@@ -121,6 +136,17 @@ export function parseIntent(text: string): Intent {
   if (stripped.length < 3) return { type: "unknown", raw: text };
 
   return { type: "lookup", query: stripped, kindHint };
+}
+
+export function isRecipeAsk(text: string) {
+  const t = text.toLowerCase().trim();
+  if (!t) return false;
+  if (/\b(recipe|procedure|process|spec|card|ingredients)\b/.test(t)) return true;
+  if (/\b(i|you|we|yeah|yep|okay|ok|just|like|um+|uh+|hmm+)\b/.test(t) && t.split(/\s+/).length > 6) {
+    return false;
+  }
+  const words = t.split(/\s+/).filter((w) => w.length > 2);
+  return words.length >= 2 && words.length <= 8;
 }
 
 export function spokenList(titles: string[]): string {

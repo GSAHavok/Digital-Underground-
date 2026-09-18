@@ -3,6 +3,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { PhotoLightbox } from "@/components/winston/photo-lightbox";
 import { cn } from "@/lib/utils";
+import { displayScales, stepsFor } from "@/lib/winston/batch";
 import type { AgentPhase, Spec } from "@/lib/winston/types";
 
 export function RecipePanel({
@@ -29,8 +30,10 @@ export function RecipePanel({
   onDelete: () => void;
 }) {
   const [photoOpen, setPhotoOpen] = useState(false);
-  const needs = spec.kind === "recipe" ? spec.ingredients : spec.materials;
-  const needLabel = spec.kind === "recipe" ? "Ingredients" : "What you need";
+  const scales = displayScales(spec);
+  const needs = spec.kind === "recipe" ? scales.full : spec.materials;
+  const needLabel = spec.kind === "recipe" ? "Ingredients · full" : "What you need";
+  const steps = stepsFor(spec, "full");
   const speaking = phase === "speaking";
 
   return (
@@ -80,12 +83,44 @@ export function RecipePanel({
         </section>
       ) : null}
 
+      {spec.kind === "recipe" && scales.half.length > 0 ? (
+        <section className="mt-4">
+          <h3 className="text-xs font-medium uppercase tracking-[0.14em] text-muted">
+            Half batch
+          </h3>
+          <ul className="mt-2 space-y-1.5 text-sm leading-snug text-muted">
+            {scales.half.map((item) => (
+              <li key={`half-${item}`} className="flex gap-2">
+                <span className="mt-2 size-1 shrink-0 rounded-full bg-muted" />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {spec.kind === "recipe" && scales.double.length > 0 ? (
+        <section className="mt-4">
+          <h3 className="text-xs font-medium uppercase tracking-[0.14em] text-muted">
+            2x batch
+          </h3>
+          <ul className="mt-2 space-y-1.5 text-sm leading-snug text-muted">
+            {scales.double.map((item) => (
+              <li key={`double-${item}`} className="flex gap-2">
+                <span className="mt-2 size-1 shrink-0 rounded-full bg-muted" />
+                <span>{item}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
       <section className="mt-5">
         <h3 className="text-xs font-medium uppercase tracking-[0.14em] text-muted">
           Steps
         </h3>
         <ol className="mt-2 space-y-2">
-          {spec.steps.map((step, i) => {
+          {steps.map((step, i) => {
             const current = reading === "step" && i === stepIndex;
             return (
               <li

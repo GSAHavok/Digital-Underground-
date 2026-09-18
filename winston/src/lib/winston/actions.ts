@@ -33,7 +33,7 @@ function asExtracted(value: unknown): ExtractedSpec | null {
   if (!title || steps.length === 0) return null;
   const list = (key: string) =>
     Array.isArray(v[key])
-      ? (v[key] as unknown[]).filter((s): s is string => typeof s === "string")
+      ? (v[key] as unknown[]).filter((s): s is string => typeof s === "string" && s.trim().length > 0)
       : [];
   return {
     title,
@@ -43,6 +43,10 @@ function asExtracted(value: unknown): ExtractedSpec | null {
     ingredients: list("ingredients"),
     materials: list("materials"),
     steps: steps.map((s) => s.trim()),
+    ingredientsHalf: list("ingredientsHalf"),
+    ingredientsDouble: list("ingredientsDouble"),
+    stepsHalf: list("stepsHalf"),
+    stepsDouble: list("stepsDouble"),
     notes: typeof v.notes === "string" ? v.notes : undefined,
     spokenIntro:
       typeof v.spokenIntro === "string" && v.spokenIntro.trim()
@@ -128,6 +132,10 @@ Return ONLY JSON with this shape:
       "ingredients": string[],
       "materials": string[],
       "steps": string[],
+      "ingredientsHalf": string[],
+      "ingredientsDouble": string[],
+      "stepsHalf": string[],
+      "stepsDouble": string[],
       "notes": string,
       "spokenIntro": string
     }
@@ -135,6 +143,9 @@ Return ONLY JSON with this shape:
 }
 Rules:
 - Kitchen spec sheets: the Process column is the steps. Title from the product or process name. Shelf life and production time go in time or notes.
+- Many kitchen sheets have 1/2, Full, and 2x columns. ingredients and steps MUST be the FULL / standard batch only. Never read half and double amounts into those arrays.
+- Put the 1/2 column in ingredientsHalf and stepsHalf. Put the 2x column in ingredientsDouble and stepsDouble. Leave those arrays empty if the sheet has no scaled columns.
+- Do not write "1/2: … Full: … 2x: …" into one ingredient or step string.
 - specs is an array. One object per DISTINCT recipe or procedure.
 - If the image is a collage, two photos in one screenshot, two columns, two stacked spec sheets, or two titled sections, return a separate spec for each. Never merge two recipes into one card or one combined title.
 - If it is one recipe page that also shows a food photo, that is still ONE spec.

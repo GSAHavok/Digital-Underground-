@@ -15,6 +15,10 @@ export type Spec = {
   ingredients: string[];
   materials: string[];
   steps: string[];
+  ingredientsHalf?: string[];
+  ingredientsDouble?: string[];
+  stepsHalf?: string[];
+  stepsDouble?: string[];
   notes?: string;
   spokenIntro: string;
   updatedAt: number;
@@ -43,7 +47,10 @@ export type VoiceCommand =
   | "stop"
   | "ingredients"
   | "start-over"
-  | "list";
+  | "list"
+  | "half"
+  | "double"
+  | "full-batch";
 
 export type Intent =
   | { type: "command"; command: VoiceCommand }
@@ -67,6 +74,10 @@ export type ExtractedSpec = {
   ingredients: string[];
   materials: string[];
   steps: string[];
+  ingredientsHalf?: string[];
+  ingredientsDouble?: string[];
+  stepsHalf?: string[];
+  stepsDouble?: string[];
   notes?: string;
   spokenIntro: string;
 };
