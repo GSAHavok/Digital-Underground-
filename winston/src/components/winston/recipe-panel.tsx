@@ -17,6 +17,7 @@ export function RecipePanel({
   onRead,
   onStop,
   onDelete,
+  hidePhoto = false,
 }: {
   spec: Spec;
   stepIndex: number;
@@ -28,6 +29,7 @@ export function RecipePanel({
   onRead: () => void;
   onStop: () => void;
   onDelete: () => void;
+  hidePhoto?: boolean;
 }) {
   const [photoOpen, setPhotoOpen] = useState(false);
   const scales = displayScales(spec);
@@ -51,7 +53,7 @@ export function RecipePanel({
             {[spec.time, spec.servings].filter(Boolean).join(" · ")}
           </p>
         </div>
-        {spec.photoDataUrl ? (
+        {spec.photoDataUrl && !hidePhoto ? (
           <button
             type="button"
             onClick={() => setPhotoOpen(true)}

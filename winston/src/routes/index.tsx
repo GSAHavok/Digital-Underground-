@@ -1,10 +1,12 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { BookOpen, Plus } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { AskBar } from "@/components/winston/ask-bar";
+import { InstallHome } from "@/components/winston/install-home";
 import { LibrarySheet } from "@/components/winston/library-sheet";
 import { ListenOrb } from "@/components/winston/listen-orb";
+import { PhotoLightbox } from "@/components/winston/photo-lightbox";
 import { RecipePanel } from "@/components/winston/recipe-panel";
 import { useWinston } from "@/lib/winston/use-winston";
 
@@ -46,6 +48,12 @@ function SpecsFileButton({
 function Home() {
   const w = useWinston();
   const onFiles = (files: File[]) => void w.addFiles(files);
+  const [heroOpen, setHeroOpen] = useState(false);
+  const reading = Boolean(w.active);
+
+  useEffect(() => {
+    if (!w.active) setHeroOpen(false);
+  }, [w.active]);
 
   const phaseLabel = {
     idle: w.needsUnlock ? "Tap once to allow the mic" : "Always listening",
@@ -78,6 +86,7 @@ function Home() {
             <Plus className="size-4" />
             <span className="sr-only">Add Specs photos</span>
           </SpecsFileButton>
+          <InstallHome />
           <Button
             variant="outline"
             size="icon"
@@ -89,27 +98,44 @@ function Home() {
         </div>
       </header>
 
-      <section className="mt-6 flex flex-col items-center text-center">
-        <ListenOrb phase={w.phase} micOn={w.micOn} onPress={w.ensureListening} />
-        <p className="mt-4 text-sm text-muted">{phaseLabel}</p>
-        <p className="mt-1 max-w-[34ch] text-pretty text-base leading-snug text-fg">
-          {w.statusLine}
-        </p>
-        {(w.heard || w.interim) && (
-          <p className="mt-3 max-w-[40ch] text-sm italic text-muted">
-            “{w.interim || w.heard}”
-          </p>
-        )}
-        {w.micError ? (
-          <p className="mt-3 max-w-[40ch] text-sm text-danger">{w.micError}</p>
-        ) : null}
-      </section>
+      {!reading ? (
+        <>
+          <section className="mt-6 flex flex-col items-center text-center">
+            <ListenOrb phase={w.phase} micOn={w.micOn} onPress={w.ensureListening} />
+            <p className="mt-4 text-sm text-muted">{phaseLabel}</p>
+            <p className="mt-1 max-w-[34ch] text-pretty text-base leading-snug text-fg">
+              {w.statusLine}
+            </p>
+            {(w.heard || w.interim) && (
+              <p className="mt-3 max-w-[40ch] text-sm italic text-muted">
+                “{w.interim || w.heard}”
+              </p>
+            )}
+            {w.micError ? (
+              <p className="mt-3 max-w-[40ch] text-sm text-danger">{w.micError}</p>
+            ) : null}
+          </section>
 
-      <div className="mt-6">
-        <AskBar onAsk={w.askTyped} disabled={w.busy} />
-      </div>
+          <div className="mt-6">
+            <AskBar onAsk={w.askTyped} disabled={w.busy} />
+          </div>
+        </>
+      ) : w.active?.photoDataUrl ? (
+        <button
+          type="button"
+          onClick={() => setHeroOpen(true)}
+          className="mt-4 overflow-hidden rounded-2xl bg-surface shadow-[var(--shadow-border)]"
+          aria-label="Expand spec photo"
+        >
+          <img
+            src={w.active.photoDataUrl}
+            alt={w.active.title}
+            className="mx-auto max-h-[72vh] w-full bg-white object-contain object-top"
+          />
+        </button>
+      ) : null}
 
-      {!w.active ? (
+      {!reading ? (
         w.library.filter((s) => s.source !== "starter").length > 0 ? (
           <section className="mt-6">
             <p className="text-xs font-medium uppercase tracking-[0.14em] text-muted">
@@ -151,12 +177,13 @@ function Home() {
           </div>
         )
       ) : (
-        <div className="mt-6">
+        <div className="mt-4">
           <RecipePanel
-            spec={w.active}
+            spec={w.active!}
             stepIndex={w.stepIndex}
             reading={w.reading}
             phase={w.phase}
+            hidePhoto
             onNext={() => void w.goNext()}
             onBack={() => void w.goBack()}
             onRepeat={() => void w.readCurrent()}
@@ -170,10 +197,12 @@ function Home() {
         </div>
       )}
 
-      <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-subtle">
-        Leave this screen open. Say Hey Winston, then your request. While a card
-        is open you can say next, repeat, or stop.
-      </p>
+      {!reading ? (
+        <p className="mt-auto pt-8 text-center text-xs leading-relaxed text-subtle">
+          Leave this screen open. Say Hey Winston, then your request. While a card
+          is open you can say next, repeat, or stop.
+        </p>
+      ) : null}
 
       <LibrarySheet
         open={w.libraryOpen}
@@ -184,6 +213,14 @@ function Home() {
         onAddFiles={onFiles}
         onDeleteSpec={(spec) => w.removeSpec(spec.id)}
       />
+
+      {heroOpen && w.active?.photoDataUrl ? (
+        <PhotoLightbox
+          src={w.active.photoDataUrl}
+          alt={w.active.title}
+          onClose={() => setHeroOpen(false)}
+        />
+      ) : null}
 
       {w.needsUnlock ? (
         <button

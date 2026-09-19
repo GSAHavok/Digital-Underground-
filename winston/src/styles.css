@@ -57,6 +57,28 @@
     font-family: var(--font-sans);
   }
 
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      linear-gradient(
+        180deg,
+        rgb(18 17 14 / 0.38) 0%,
+        rgb(18 17 14 / 0.52) 42%,
+        rgb(18 17 14 / 0.86) 78%,
+        rgb(18 17 14 / 0.94) 100%
+      ),
+      url("/winston-bg.jpg") center 18% / cover no-repeat;
+  }
+
+  body > * {
+    position: relative;
+    z-index: 1;
+  }
+
   button:not(:disabled),
   [role="button"]:not(:disabled) {
     cursor: pointer;

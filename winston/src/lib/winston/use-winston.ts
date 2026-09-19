@@ -10,7 +10,8 @@ import {
 import { isReadableSpecFile, isMaybeSpecFile } from "./drive-parse";
 import { batchLabel, needsFor, stepsFor, takeBatchFromQuery, type BatchSize } from "./batch";
 import { foldHeard, isHandsFreeCommand, isRecipeAsk, parseIntent, spokenList, stripWake } from "./intent";
-import { measurePhoto, preparePhoto, splitIntoHalves } from "./image";
+import { coalesceSpecs } from "./extract";
+import { preparePhoto, splitIntoHalves } from "./image";
 import {
   bestTranscript,
   getSpeechRecognition,
@@ -57,8 +58,8 @@ function browserSpeak(text: string): Promise<void> {
   });
 }
 
-const SHEET_HINT =
-  "a kitchen spec sheet. The Process column is the steps. Title from the product name. If there are 1/2, Full, and 2x columns, ingredients and steps are the FULL column only. Put 1/2 and 2x in ingredientsHalf/stepsHalf and ingredientsDouble/stepsDouble. Shelf life and production time go in time or notes. Extract only what is in this image.";
+const PHOTO_HINT =
+  "a recipe or procedure. Default is one spec for the whole photo. Only make two specs if two clearly separate titled recipes are visible. Do not invent a second recipe from a crop or food photo. If there are 1/2, Full, and 2x columns, use Full for ingredients and steps.";
 
 function clipSpeech(text: string, max = 1400) {
   if (text.length <= max) return text;
@@ -91,7 +92,7 @@ async function extractSpecsFromUrl(
   ]);
   if ("ok" in result && result.ok && result.specs.length > 0) {
     const specs = result.specs.filter((s) => s.title !== "Unreadable spec");
-    return { specs: specs.length > 0 ? specs : result.specs };
+    return { specs: coalesceSpecs(specs.length > 0 ? specs : result.specs) };
   }
   return {
     specs: [],
@@ -257,7 +258,7 @@ export function useWinston() {
     void putSpec(spec);
   }, []);
 
-  const stopAudio = useCallback(() => {
+  const killPlayback = useCallback(() => {
     if (audioRef.current) {
       audioRef.current.pause();
       audioRef.current.src = "";
@@ -265,6 +266,13 @@ export function useWinston() {
     }
     if (typeof window !== "undefined") window.speechSynthesis?.cancel();
   }, []);
+
+  const stopAudio = useCallback(() => {
+    speakGen.current += 1;
+    pauseRec.current = false;
+    ignoreUntil.current = 0;
+    killPlayback();
+  }, [killPlayback]);
 
   const removeSpec = useCallback((id: string) => {
     if (activeRef.current?.id === id) {
@@ -319,7 +327,7 @@ export function useWinston() {
       } catch {
         // ignore
       }
-      stopAudio();
+      killPlayback();
       setPhase("speaking");
       try {
         let result: { ok: true; mime: string; audioBase64: string } | { ok: false; error: string } =
@@ -338,6 +346,7 @@ export function useWinston() {
         if (result.ok) {
           await new Promise<void>((resolve) => {
             const audio = new Audio(`data:${result.mime};base64,${result.audioBase64}`);
+            audio.volume = 1;
             audioRef.current = audio;
             let settled = false;
             const done = () => {
@@ -371,7 +380,7 @@ export function useWinston() {
         resumeEar();
       }
     },
-    [resumeEar, stopAudio],
+    [killPlayback, resumeEar],
   );
 
   const speakAndWait = useCallback(
@@ -746,6 +755,7 @@ export function useWinston() {
             setActive(null);
             setPhase("listening");
             setStatusLine("Listening for Hey Winston.");
+            resumeEar();
             return;
           }
           if (intent.command === "list") {
@@ -835,6 +845,7 @@ export function useWinston() {
       lookup,
       openSpec,
       readCurrent,
+      resumeEar,
       speakAndWait,
       stopAudio,
     ],
@@ -852,7 +863,7 @@ export function useWinston() {
     rec.continuous = true;
     rec.interimResults = true;
     rec.lang = "en-US";
-    rec.maxAlternatives = 1;
+    rec.maxAlternatives = 4;
     rec.onresult = (event) => {
       lastHeardAt.current = Date.now();
       if (pauseRec.current) return;
@@ -868,7 +879,17 @@ export function useWinston() {
       const shortCommand =
         /^(next|repeat|stop|back|ingredients|half|double|full)[.!?]*$/i.test(finalText.trim()) &&
         Boolean(activeRef.current);
-      const delay = shortCommand ? 40 : woke && stripWake(phraseNow).rest.split(/\s+/).filter(Boolean).length >= 2 ? 70 : woke ? 120 : 220;
+      const restWords = stripWake(phraseNow).rest.split(/\s+/).filter(Boolean).length;
+      const capturing = phaseRef.current === "capturing" || phaseRef.current === "awaiting";
+      const delay = shortCommand
+        ? 80
+        : woke && restWords >= 2
+          ? 650
+          : woke
+            ? 800
+            : capturing
+              ? 500
+              : 320;
       holdTimer.current = window.setTimeout(() => {
         const phrase = holdBuf.current.trim();
         holdBuf.current = "";
@@ -885,6 +906,7 @@ export function useWinston() {
         setPhase("idle");
         return;
       }
+      lastHeardAt.current = Date.now();
     };
     rec.onend = () => {
       if (!wantMic.current || pauseRec.current) return;
@@ -903,7 +925,8 @@ export function useWinston() {
 
   const startMic = useCallback(async () => {
     if (startingRef.current) return;
-    if (pauseRec.current || phaseRef.current === "speaking") return;
+    if (phaseRef.current === "speaking") return;
+    if (pauseRec.current) pauseRec.current = false;
     const Ctor = getSpeechRecognition();
     if (!Ctor) {
       setMicError(
@@ -947,11 +970,20 @@ export function useWinston() {
         if (!wantMic.current) return;
         if (pauseRec.current) return;
         if (phaseRef.current === "speaking") return;
+        if (Date.now() - lastHeardAt.current < 12_000) return;
         try {
-          recRef.current?.start();
+          recRef.current?.abort();
         } catch {
-          // already running
+          // ignore
         }
+        window.setTimeout(() => {
+          if (!wantMic.current || pauseRec.current) return;
+          try {
+            recRef.current?.start();
+          } catch {
+            // already running
+          }
+        }, 180);
       }, 8000);
       setMicOn(true);
       setPhase("listening");
@@ -1111,50 +1143,26 @@ export function useWinston() {
           setStatusLine(`Reading photo ${i + 1} of ${list.length}…`);
           try {
             const { displayUrl, extractUrl } = await preparePhoto(list[i]);
-            const size = await measurePhoto(displayUrl);
-            const stacked = size.height > size.width * 1.18;
-            const sideBySide = size.width > size.height * 1.25;
             let specs: ExtractedSpec[] = [];
-            let photos: string[] = [];
             let error = "";
 
-            if (stacked || sideBySide) {
-              const axis = stacked ? "horizontal" : "vertical";
-              setStatusLine(`Photo ${i + 1} has two sheets — reading each…`);
-              const extractHalves = await splitIntoHalves(extractUrl, axis, 0.78);
-              const displayHalves = await splitIntoHalves(displayUrl, axis, 0.9);
-              for (let h = 0; h < extractHalves.length; h += 1) {
-                const part = await extractSpecsFromUrl(extractHalves[h], SHEET_HINT, 45_000);
-                for (const item of part.specs) {
-                  specs.push(item);
-                  photos.push(displayHalves[h] ?? displayUrl);
-                }
-                if (part.error) error = part.error;
-              }
-            }
+            setStatusLine(`Reading photo ${i + 1} of ${list.length}…`);
+            const whole = await extractSpecsFromUrl(extractUrl, PHOTO_HINT, 48_000);
+            specs = whole.specs;
+            if (whole.error) error = whole.error;
 
             if (specs.length === 0) {
-              setStatusLine(`Reading photo ${i + 1} of ${list.length}…`);
-              const part = await extractSpecsFromUrl(extractUrl, SHEET_HINT, 48_000);
-              specs = part.specs;
-              photos = specs.map(() => displayUrl);
-              if (part.error) error = part.error;
-            }
-
-            if (specs.length === 0) {
-              setStatusLine(`Photo ${i + 1} is dense — reading each half…`);
+              setStatusLine(`Photo ${i + 1} is dense — trying a closer read…`);
               for (const axis of ["horizontal", "vertical"] as const) {
                 if (specs.length > 0) break;
                 const extractHalves = await splitIntoHalves(extractUrl, axis, 0.78);
-                const displayHalves = await splitIntoHalves(displayUrl, axis, 0.9);
-                for (let h = 0; h < extractHalves.length; h += 1) {
-                  const part = await extractSpecsFromUrl(extractHalves[h], SHEET_HINT, 40_000);
-                  for (const item of part.specs) {
-                    specs.push(item);
-                    photos.push(displayHalves[h] ?? displayUrl);
-                  }
+                const parts: ExtractedSpec[] = [];
+                for (const half of extractHalves) {
+                  const part = await extractSpecsFromUrl(half, PHOTO_HINT, 40_000);
+                  parts.push(...part.specs);
                   if (part.error) error = part.error;
                 }
+                specs = coalesceSpecs(parts);
               }
             }
             if (specs.length === 0) {
@@ -1165,7 +1173,7 @@ export function useWinston() {
               const spec = specFromExtracted(item, {
                 id: `phone-${Date.now()}-${i}-${j}`,
                 source: "phone",
-                photoDataUrl: photos[j] ?? displayUrl,
+                photoDataUrl: displayUrl,
               });
               upsertSpec(spec);
               added.push(spec);

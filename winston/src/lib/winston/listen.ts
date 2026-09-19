@@ -43,8 +43,9 @@ export async function requestMicAccess(): Promise<boolean> {
     {
       audio: {
         echoCancellation: true,
-        noiseSuppression: true,
+        noiseSuppression: false,
         autoGainControl: true,
+        channelCount: 1,
       },
     },
     { audio: true },

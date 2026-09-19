@@ -146,10 +146,11 @@ Rules:
 - Many kitchen sheets have 1/2, Full, and 2x columns. ingredients and steps MUST be the FULL / standard batch only. Never read half and double amounts into those arrays.
 - Put the 1/2 column in ingredientsHalf and stepsHalf. Put the 2x column in ingredientsDouble and stepsDouble. Leave those arrays empty if the sheet has no scaled columns.
 - Do not write "1/2: … Full: … 2x: …" into one ingredient or step string.
-- specs is an array. One object per DISTINCT recipe or procedure.
-- If the image is a collage, two photos in one screenshot, two columns, two stacked spec sheets, or two titled sections, return a separate spec for each. Never merge two recipes into one card or one combined title.
-- If it is one recipe page that also shows a food photo, that is still ONE spec.
-- Do not invent extra specs. If there is only one, specs has one item.
+- specs is an array. Default is ONE spec for the whole photo.
+- A full recipe page with a food photo, title, ingredients, and steps is ONE spec. Do not split a single page into two cards.
+- Only return two specs if there are two clearly separate titled recipes or procedures, each with its own ingredients and steps.
+- Never invent a second recipe from a header, logo, food photo, or a random crop of the page.
+- Do not invent extra specs. If you are unsure, return one spec for the whole image.
 - kind is recipe if it is food/drink, otherwise procedure.
 - steps are spoken-friendly ordered instructions, one action each, no numbering in the string.
 - ingredients for food; materials for tools/parts on procedures. Keep each spec's lists only from that item.
@@ -340,12 +341,12 @@ export const extractFromPhoto = createServerFn({ method: "POST" })
     if (data.dataUrl.length > 2_200_000) {
       return { ok: false as const, error: "That photo is too large. Try a closer crop." };
     }
-    const hint = data.hint?.trim() || "kitchen spec sheets, recipes, or procedures";
+    const hint = data.hint?.trim() || "a recipe or procedure";
     const got = await extractFromParts([
       { type: "image_url", image_url: { url: data.dataUrl } },
       {
         type: "text",
-        text: `Read this photo of ${hint}. If it is a spec sheet, use the Process column as the steps. If the screenshot contains two photos, two stacked sheets, two columns, or two separate recipes/procedures, extract each as its own spec. Do not merge them. Extract every ingredient or material and every step for each one, in order.`,
+        text: `Read this photo of ${hint}. Default is ONE spec for the whole page. A normal recipe screenshot with a picture plus ingredients and steps is still one spec. Only return two specs if two clearly separate titled recipes are visible. Do not invent a second recipe from a crop, header, or food photo. If it is a spec sheet with 1/2, Full, and 2x columns, use the Full column for ingredients and steps.`,
       },
     ]);
     if (!got.ok) return { ok: false as const, error: got.error };
