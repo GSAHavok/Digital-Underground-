@@ -41,10 +41,10 @@ export type DriveStatus =
   | { state: "error"; message: string };
 
 export type VoiceCommand =
-  | "next"
+  | "steps"
   | "repeat"
   | "back"
-  | "stop"
+  | "close"
   | "ingredients"
   | "start-over"
   | "list"
@@ -55,6 +55,12 @@ export type VoiceCommand =
 export type Intent =
   | { type: "command"; command: VoiceCommand }
   | { type: "lookup"; query: string; kindHint?: SpecKind }
+  | { type: "goto-step"; n: number }
+  | { type: "radio"; query: string }
+  | { type: "radio-stop" }
+  | { type: "clock-in"; at: number | null; missed: boolean }
+  | { type: "clock-out"; at: number | null; missed: boolean }
+  | { type: "hours" }
   | { type: "unknown"; raw: string };
 
 export type AgentPhase =

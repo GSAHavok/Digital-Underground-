@@ -89,6 +89,11 @@ function joinName(name: string, amount: string) {
   return `${amt} ${n}`.replace(/\s+/g, " ").trim();
 }
 
+function noteNachoPack(line: string) {
+  if (!/nacho\s*pack/i.test(line) || /red onion/i.test(line)) return line;
+  return line.replace(/nacho\s*pack/i, "Nacho Pack (one ounce tomato. One ounce red onion.)");
+}
+
 export function lineForBatch(line: string, batch: BatchSize) {
   const parsed = parseScaleLine(line);
   if (parsed) {
@@ -98,10 +103,10 @@ export function lineForBatch(line: string, batch: BatchSize) {
         : batch === "double"
           ? parsed.double || parsed.full
           : parsed.full;
-    return joinName(parsed.name, amount);
+    return noteNachoPack(joinName(parsed.name, amount));
   }
-  if (batch === "full") return stripAltScales(line);
-  return line.trim();
+  if (batch === "full") return noteNachoPack(stripAltScales(line));
+  return noteNachoPack(line.trim());
 }
 
 function listOr(primary: string[] | undefined, fallback: string[]) {

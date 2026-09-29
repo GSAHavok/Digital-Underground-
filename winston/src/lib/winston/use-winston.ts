@@ -2,14 +2,18 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { isFramed } from "@/lib/app-data/login";
 import { useRefetchWhenConnectorReady } from "@/lib/app-data/use-connector-readiness";
 import {
+  askWinston,
   extractFromPhoto,
   readDriveSpec,
   speakText,
   syncSpecsFolder,
 } from "./actions";
+import { clockIn, clockOut, formatClock, formatDay, formatDuration } from "./hours";
+import { currentStation, lastStation, nudgeRadio, playStation, setRadioDuck, stopRadio } from "./radio";
+import { matchStation, spokenFreq, stationCommand, wantsRadioOff } from "./stations";
 import { isReadableSpecFile, isMaybeSpecFile } from "./drive-parse";
 import { batchLabel, needsFor, stepsFor, takeBatchFromQuery, type BatchSize } from "./batch";
-import { foldHeard, isHandsFreeCommand, isRecipeAsk, parseIntent, spokenList, stripWake } from "./intent";
+import { foldHeard, isHandsFreeCommand, isRecipeAsk, looseSpecCommand, parseIntent, spokenList, stripWake } from "./intent";
 import { coalesceSpecs } from "./extract";
 import { preparePhoto, splitIntoHalves } from "./image";
 import {
@@ -160,7 +164,7 @@ export function useWinston() {
   const [phase, setPhase] = useState<AgentPhase>("idle");
   const [heard, setHeard] = useState("");
   const [interim, setInterim] = useState("");
-  const [statusLine, setStatusLine] = useState("Always listening for Hey Winston.");
+  const [statusLine, setStatusLine] = useState("Always listening for Winston.");
   const [active, setActive] = useState<Spec | null>(null);
   const [stepIndex, setStepIndex] = useState(0);
   const [reading, setReading] = useState<"intro" | "ingredients" | "step">("intro");
@@ -172,10 +176,13 @@ export function useWinston() {
   const [driveFiles, setDriveFiles] = useState<DriveFile[]>([]);
   const [busy, setBusy] = useState(false);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  const [radioOpen, setRadioOpen] = useState(false);
+  const [hoursOpen, setHoursOpen] = useState(false);
 
   const recRef = useRef<SpeechRecognitionLike | null>(null);
   const wantMic = useRef(true);
   const pauseRec = useRef(false);
+  const duckHold = useRef(false);
   const ignoreUntil = useRef(0);
   const speakGen = useRef(0);
   const captureTimer = useRef<number | null>(null);
@@ -184,6 +191,8 @@ export function useWinston() {
   const lastHeardAt = useRef(Date.now());
   const watchdog = useRef<number | null>(null);
   const pendingPicks = useRef<Spec[]>([]);
+  const chatRef = useRef<{ role: "user" | "winston"; text: string }[]>([]);
+  const readingAll = useRef(false);
   const handling = useRef(false);
   const startingRef = useRef(false);
   const greetedRef = useRef(false);
@@ -208,6 +217,11 @@ export function useWinston() {
   }, [phase]);
   useEffect(() => {
     activeRef.current = active;
+  }, [active]);
+  useEffect(() => {
+    if (!active) return;
+    duckHold.current = true;
+    setRadioDuck(true);
   }, [active]);
   useEffect(() => {
     stepRef.current = stepIndex;
@@ -268,6 +282,7 @@ export function useWinston() {
   }, []);
 
   const stopAudio = useCallback(() => {
+    readingAll.current = false;
     speakGen.current += 1;
     pauseRec.current = false;
     ignoreUntil.current = 0;
@@ -281,7 +296,7 @@ export function useWinston() {
       setReading("intro");
       setStepIndex(0);
       setPhase("listening");
-      setStatusLine("Listening for Hey Winston.");
+      setStatusLine("Listening for Winston.");
     }
     setLibrary((prev) => prev.filter((s) => s.id !== id));
     void deleteSpec(id);
@@ -294,17 +309,29 @@ export function useWinston() {
     }
   }, []);
 
-  const armCapture = useCallback(() => {
+  const releaseDuck = useCallback(() => {
+    duckHold.current = false;
+    setRadioDuck(false);
+  }, []);
+
+  const holdDuck = useCallback(() => {
+    if (!currentStation()) return;
+    duckHold.current = true;
+    setRadioDuck(true);
+  }, []);
+
+  const armCapture = useCallback((ms = 28000) => {
     clearCapture();
     captureTimer.current = window.setTimeout(() => {
       if (phaseRef.current === "capturing") {
         pendingPicks.current = [];
         setPhase("listening");
-        setStatusLine("Listening for Hey Winston.");
+        setStatusLine("Listening for Winston.");
         setHeard("");
+        if (!activeRef.current) releaseDuck();
       }
-    }, 20000);
-  }, [clearCapture]);
+    }, ms);
+  }, [clearCapture, releaseDuck]);
 
   const resumeEar = useCallback(() => {
     if (!wantMic.current || pauseRec.current) return;
@@ -322,6 +349,7 @@ export function useWinston() {
       const id = (speakGen.current += 1);
       pauseRec.current = true;
       ignoreUntil.current = Date.now() + 180_000;
+      setRadioDuck(true);
       try {
         recRef.current?.stop();
       } catch {
@@ -372,10 +400,11 @@ export function useWinston() {
       } catch {
         if (speakGen.current === id) await browserSpeak(cleaned);
       } finally {
+        const keepLow = Boolean(activeRef.current) || duckHold.current;
+        if (currentStation()) setRadioDuck(keepLow);
+        else setRadioDuck(false);
         if (speakGen.current !== id) return;
-        ignoreUntil.current = Date.now() + 350;
-        await sleep(120);
-        if (speakGen.current !== id) return;
+        ignoreUntil.current = Date.now() + 200;
         pauseRec.current = false;
         resumeEar();
       }
@@ -412,14 +441,11 @@ export function useWinston() {
       setReading("intro");
       setStepIndex(0);
       setHeard("");
-      if (line) {
-        await speakAndWait(line, "listening", "Listening for Hey Winston.");
-        return;
-      }
       setPhase("listening");
-      setStatusLine("Listening for Hey Winston.");
+      setStatusLine(line || "Listening for Winston.");
+      releaseDuck();
     },
-    [speakAndWait],
+    [releaseDuck],
   );
 
   const openSpec = useCallback(
@@ -431,29 +457,21 @@ export function useWinston() {
       setLibraryOpen(false);
       if (mode === "manual") {
         setPhase("awaiting");
-        setStatusLine("Say Hey Winston, then the name. Or say next.");
+        setStatusLine("Say steps, repeat, or close.");
         return;
       }
       const needs = needsFor(spec, batchRef.current);
-      const steps = stepsFor(spec, batchRef.current);
       const scaleNote = batchRef.current === "full" ? "" : ` ${batchLabel(batchRef.current)}.`;
       if (needs.length > 0) {
         setReading("ingredients");
         await speak(`You'll need${scaleNote}: ${needs.join(". ")}.`);
-        setStatusLine("Say next, repeat, or stop.");
-        setPhase("awaiting");
-        return;
+      } else {
+        setReading("intro");
       }
-      setReading("step");
-      await speak(`Step 1 of ${steps.length}. ${steps[0]}.${steps.length <= 1 ? " That's everything." : ""}`);
-      if (steps.length <= 1) {
-        await returnHome();
-        return;
-      }
-      setStatusLine("Say next, repeat, or stop.");
+      setStatusLine("Say steps, repeat, or close.");
       setPhase("awaiting");
     },
-    [returnHome, speak],
+    [speak],
   );
 
   const ingestDriveFile = useCallback(
@@ -515,7 +533,7 @@ export function useWinston() {
         await speak(`Step ${idx + 1} of ${steps.length}. ${step}.`);
       }
     }
-    setStatusLine("Say next, repeat, or stop.");
+    setStatusLine("Say steps, repeat, or close.");
     setPhase("awaiting");
   }, [speak]);
 
@@ -523,92 +541,77 @@ export function useWinston() {
     async (batch: BatchSize) => {
       const spec = activeRef.current;
       if (!spec) {
-        await speakAndWait(
-          "Nothing is open. Ask me for a recipe first.",
-          "listening",
-          "Listening for Hey Winston.",
-        );
+        setPhase("listening");
+        setStatusLine("Nothing is open.");
         return;
       }
       batchRef.current = batch;
       setStepIndex(0);
       const needs = needsFor(spec, batch);
-      const steps = stepsFor(spec, batch);
       if (needs.length > 0) {
         setReading("ingredients");
         await speak(`${batchLabel(batch)}. You'll need: ${needs.join(". ")}.`);
+        setStatusLine("Say steps, repeat, or close.");
         setPhase("awaiting");
         return;
       }
       setReading("step");
-      await speak(
-        `${batchLabel(batch)}. Step 1 of ${steps.length}. ${steps[0]}.${steps.length <= 1 ? " That's everything." : ""}`,
-      );
-      if (steps.length <= 1) {
-        await returnHome();
-        return;
-      }
+      setStatusLine("Say steps, repeat, or close.");
       setPhase("awaiting");
     },
-    [returnHome, speak, speakAndWait],
+    [speak, speakAndWait],
   );
 
-  const goNext = useCallback(async () => {
+  const readAllSteps = useCallback(async () => {
     const spec = activeRef.current;
     if (!spec) {
-      await speakAndWait(
-        "Nothing is open. Ask me for a recipe or a process.",
-        "listening",
-        "Listening for Hey Winston.",
-      );
+      setPhase("listening");
+      setStatusLine("Nothing is open.");
       return;
     }
-    const needs = needsFor(spec, batchRef.current);
     const steps = stepsFor(spec, batchRef.current);
-    if (readingRef.current === "intro") {
-      if (needs.length > 0) {
-        setReading("ingredients");
-        await speak(`You'll need: ${needs.join(". ")}.`);
+    if (steps.length === 0) {
+      setStatusLine("No steps on this card.");
+      setPhase("awaiting");
+      return;
+    }
+    readingAll.current = true;
+    setReading("step");
+    for (let i = 0; i < steps.length; i += 1) {
+      if (!readingAll.current || activeRef.current?.id !== spec.id) return;
+      setStepIndex(i);
+      await speak(`Step ${i + 1} of ${steps.length}. ${steps[i]}.`);
+    }
+    if (!readingAll.current || activeRef.current?.id !== spec.id) return;
+    readingAll.current = false;
+    setStatusLine("Say steps, repeat, or close.");
+    setPhase("awaiting");
+  }, [speak, speakAndWait]);
+
+  const gotoStep = useCallback(
+    async (n: number) => {
+      const spec = activeRef.current;
+      if (!spec) {
+        setPhase("listening");
+        setStatusLine("Nothing is open.");
+        return;
+      }
+      const steps = stepsFor(spec, batchRef.current);
+      if (n < 1 || n > steps.length) {
+        setStatusLine(`${steps.length} steps on this card.`);
         setPhase("awaiting");
         return;
       }
       setReading("step");
-      setStepIndex(0);
-      await speak(`Step 1 of ${steps.length}. ${steps[0]}.${steps.length <= 1 ? " That's everything." : ""}`);
-      if (steps.length <= 1) {
-        await returnHome();
-        return;
-      }
+      setStepIndex(n - 1);
+      await speak(`Step ${n} of ${steps.length}. ${steps[n - 1]}.`);
+      setStatusLine("Say steps, repeat, or close.");
       setPhase("awaiting");
-      return;
-    }
-    if (readingRef.current === "ingredients") {
-      setReading("step");
-      setStepIndex(0);
-      await speak(`Step 1 of ${steps.length}. ${steps[0]}.${steps.length <= 1 ? " That's everything." : ""}`);
-      if (steps.length <= 1) {
-        await returnHome();
-        return;
-      }
-      setPhase("awaiting");
-      return;
-    }
-    const next = stepRef.current + 1;
-    if (next >= steps.length) {
-      await returnHome("That's everything.");
-      return;
-    }
-    setStepIndex(next);
-    const last = next + 1 >= steps.length;
-    await speak(
-      `Step ${next + 1} of ${steps.length}. ${steps[next]}.${last ? " That's everything." : ""}`,
-    );
-    if (last) {
-      await returnHome();
-      return;
-    }
-    setPhase("awaiting");
-  }, [returnHome, speak, speakAndWait]);
+    },
+    [speak, speakAndWait],
+  );
+
+  const goNext = readAllSteps;
 
   const goBack = useCallback(async () => {
     const spec = activeRef.current;
@@ -652,26 +655,118 @@ export function useWinston() {
         const numbered = localHits
           .map((s, i) => `${i + 1}: ${s.title}`)
           .join(". ");
-        await speakAndWait(
-          `I found a few. ${numbered}. Say the number or the name.`,
-          "capturing",
-          "Say the number or the name.",
-        );
+        setPhase("capturing");
+        setStatusLine(numbered);
         armCapture();
         return true;
       }
 
       if (silentIfMissing) return false;
 
-      await speakAndWait(
-        `I don't have ${q} yet. Add a photo of it.`,
-        "listening",
-        "Listening for Hey Winston.",
-      );
+      setPhase("listening");
+      setStatusLine(`I don't have ${q} yet.`);
       return false;
     },
     [armCapture, openSpec, speakAndWait],
   );
+
+  const converse = useCallback(
+    async (question: string) => {
+      const asked = question.trim();
+      if (asked.length < 2) return;
+      setPhase("thinking");
+      setStatusLine("Winston.");
+      const specs = libraryRef.current
+        .filter((s) => s.source !== "starter")
+        .map((s) => s.title);
+      const result = await Promise.race([
+        askWinston({
+          data: {
+            question: asked,
+            history: chatRef.current,
+            specs,
+            nowIso: new Date().toISOString(),
+            timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          },
+        }),
+        new Promise<{ ok: false; error: string }>((resolve) => {
+          setTimeout(() => resolve({ ok: false, error: "timeout" }), 18_000);
+        }),
+      ]);
+      const line =
+        result && "ok" in result && result.ok
+          ? result.text.replace(/\s+/g, " ").trim()
+          : "I didn't catch a good answer. Ask me again.";
+      chatRef.current = [
+        ...chatRef.current,
+        { role: "user" as const, text: asked },
+        { role: "winston" as const, text: line },
+      ].slice(-10);
+      setPhase("listening");
+      setStatusLine(line);
+    },
+    [armCapture],
+  );
+
+  const startRadio = useCallback(
+    async (query: string) => {
+      const station = query.trim() ? matchStation(query) : lastStation();
+      if (!station) {
+        const heard = spokenFreq(query);
+        setPhase("capturing");
+        setStatusLine(
+          heard
+            ? `No station for ${heard}.`
+            : "Say play radio, or a station like 101.3.",
+        );
+        armCapture();
+        return;
+      }
+      try {
+        await playStation(station);
+        setRadioOpen(false);
+        clearCapture();
+        setPhase("listening");
+        setStatusLine("Listening for Winston.");
+      } catch {
+        setRadioOpen(false);
+        setPhase("listening");
+        setStatusLine(`${station.name} didn't start.`);
+      }
+      if (activeRef.current) setRadioDuck(true, 0.5);
+      else releaseDuck();
+    },
+    [clearCapture, releaseDuck],
+  );
+
+  const punchIn = useCallback(async (at: number | null) => {
+    const specified = at != null;
+    const result = await clockIn(at ?? Date.now(), specified);
+    if (!result.ok) {
+      setPhase("listening");
+      setStatusLine(`Already in since ${formatClock(result.open.inAt)}.`);
+    } else {
+      setHoursOpen(true);
+      const when = `${formatDay(result.shift.inAt)} at ${formatClock(result.shift.inAt)}`;
+      setPhase("listening");
+      setStatusLine(result.moved ? `Clock-in moved to ${when}.` : `Clocked in ${when}.`);
+    }
+  }, []);
+
+  const punchOut = useCallback(async () => {
+    const result = await clockOut();
+    if (!result.ok) {
+      setPhase("listening");
+      setStatusLine("You're not clocked in.");
+    } else {
+      const span = (result.shift.outAt ?? Date.now()) - result.shift.inAt;
+      setHoursOpen(true);
+      setPhase("listening");
+      setStatusLine(
+        `Clocked out ${formatClock(result.shift.outAt ?? Date.now())}. ${formatDuration(span)}.`,
+      );
+    }
+  }, []);
 
   const handleUtterance = useCallback(
     async (raw: string, fromTyped = false) => {
@@ -680,22 +775,33 @@ export function useWinston() {
       const capturing = phaseRef.current === "capturing";
       const picking = pendingPicks.current.length > 0;
       const text = foldHeard((woke ? rest : raw).trim());
-      const intent = text
+      const parsed = text
         ? parseIntent(text)
         : { type: "unknown" as const, raw };
+      const radioOn = Boolean(currentStation());
+      const stopRadioNow = wantsRadioOff(foldHeard(raw)) || wantsRadioOff(text);
+      const loose =
+        !stopRadioNow &&
+        recipeOpen &&
+        (parsed.type === "unknown" || parsed.type === "lookup" || radioOn)
+          ? looseSpecCommand(foldHeard(`${rest} ${raw}`))
+          : null;
+      const intent = stopRadioNow ? ({ type: "radio-stop" } as const) : (loose ?? parsed);
       const handsFree =
         recipeOpen &&
         intent.type === "command" &&
         isHandsFreeCommand(intent.command);
+      const stepAsk = recipeOpen && intent.type === "goto-step";
 
       if (!fromTyped) {
-        if (pauseRec.current && !handsFree && !picking) return;
-        if (Date.now() < ignoreUntil.current && !handsFree && !picking) return;
+        if (pauseRec.current && !handsFree && !picking && !stepAsk) return;
+        if (Date.now() < ignoreUntil.current && !handsFree && !picking && !stepAsk && !woke) return;
         if (handling.current) return;
         if (
           (phaseRef.current === "speaking" || phaseRef.current === "thinking") &&
           !handsFree &&
           !picking &&
+          !stepAsk &&
           intent.type !== "command"
         ) {
           return;
@@ -703,31 +809,105 @@ export function useWinston() {
       }
 
       const openMic = capturing || picking;
-      if (!fromTyped && !woke && !handsFree && !(openMic && text)) return;
-      if (!fromTyped && !woke && !handsFree && !openMic) return;
+      if (
+        !fromTyped &&
+        radioOn &&
+        !woke &&
+        !capturing &&
+        !picking &&
+        !handsFree &&
+        !stepAsk &&
+        !stopRadioNow
+      ) {
+        return;
+      }
+      if (!fromTyped && !woke && !handsFree && !stepAsk && !(openMic && text) && !stopRadioNow) return;
+      if (!fromTyped && !woke && !handsFree && !stepAsk && !openMic && !stopRadioNow) return;
 
       handling.current = true;
       clearCapture();
+      if (radioOn && (handsFree || stepAsk || Boolean(activeRef.current))) {
+        holdDuck();
+      }
       try {
         if (phaseRef.current === "speaking" && (handsFree || picking)) {
           stopAudio();
         }
 
+        if (woke && radioOn) setRadioDuck(true, 0.12);
         if (woke && !text && !picking) {
-          setHeard("Hey Winston");
+          setHeard("");
           setPhase("capturing");
           setStatusLine("Listening.");
-          armCapture();
+          armCapture(radioOn ? 8000 : 28000);
+          return;
+        }
+
+        const stationPick = stationCommand(text);
+        if (stationPick && (woke || capturing || radioOn)) {
+          await startRadio(stationPick);
+          return;
+        }
+
+        const radioBleed =
+          radioOn &&
+          woke &&
+          !stopRadioNow &&
+          !handsFree &&
+          !stepAsk &&
+          intent.type !== "clock-in" &&
+          intent.type !== "clock-out" &&
+          intent.type !== "hours" &&
+          intent.type !== "radio" &&
+          intent.type !== "radio-stop" &&
+          text.split(/\s+/).filter(Boolean).length > 4;
+
+        if (radioBleed) {
+          setPhase("capturing");
+          setStatusLine("Listening.");
+          armCapture(8000);
           return;
         }
 
         setHeard(text);
 
+        if (intent.type === "radio-stop") {
+          stopRadio();
+          setRadioOpen(false);
+          setPhase("listening");
+          setStatusLine("Listening for Winston.");
+          releaseDuck();
+          return;
+        }
+        if (intent.type === "radio") {
+          await startRadio(intent.query);
+          return;
+        }
+        if (intent.type === "clock-in") {
+          if (intent.missed) {
+            setPhase("capturing");
+            setStatusLine("Say clock in for 10 AM.");
+            armCapture();
+            return;
+          }
+          await punchIn(intent.at);
+          return;
+        }
+        if (intent.type === "clock-out") {
+          await punchOut();
+          return;
+        }
+        if (intent.type === "hours") {
+          setHoursOpen(true);
+          setPhase("listening");
+          setStatusLine("Hours.");
+          return;
+        }
+
         if (picking && text) {
-          if (intent.type === "command" && intent.command === "stop") {
+          if (intent.type === "command" && intent.command === "close") {
             pendingPicks.current = [];
-            setPhase("listening");
-            setStatusLine("Listening for Hey Winston.");
+            await returnHome();
             return;
           }
           const chosen = pickFromList(pendingPicks.current, text);
@@ -739,23 +919,16 @@ export function useWinston() {
           const numbered = pendingPicks.current
             .map((s, i) => `${i + 1}: ${s.title}`)
             .join(". ");
-          await speakAndWait(
-            `Say one, two, or the name. ${numbered}.`,
-            "capturing",
-            "Say the number or the name.",
-          );
+          setPhase("capturing");
+          setStatusLine(numbered);
           armCapture();
           return;
         }
 
         if (intent.type === "command") {
-          if (intent.command === "stop") {
+          if (intent.command === "close") {
             stopAudio();
-            batchRef.current = "full";
-            setActive(null);
-            setPhase("listening");
-            setStatusLine("Listening for Hey Winston.");
-            resumeEar();
+            await returnHome();
             return;
           }
           if (intent.command === "list") {
@@ -764,11 +937,12 @@ export function useWinston() {
               await openSpec(own[0], "auto");
               return;
             }
-            await speakAndWait(listSpeech(), "listening", "Listening for Hey Winston.");
+            setPhase("listening");
+            setStatusLine(listSpeech());
             return;
           }
-          if (intent.command === "next") {
-            await goNext();
+          if (intent.command === "steps") {
+            await readAllSteps();
             return;
           }
           if (intent.command === "repeat") {
@@ -806,30 +980,27 @@ export function useWinston() {
           }
         }
 
-        if (intent.type === "lookup") {
-          const silent = !fromTyped && !isRecipeAsk(intent.query);
-          const found = await lookup(intent.query, intent.kindHint, silent);
-          if (!found && silent) {
-            if (capturing) {
-              setPhase("capturing");
-              setStatusLine("Listening.");
-              armCapture();
-            } else {
-              setPhase("listening");
-              setStatusLine("Listening for Hey Winston.");
-            }
-          }
+        if (intent.type === "goto-step") {
+          await gotoStep(intent.n);
           return;
         }
 
-        if (capturing && text.length >= 2) {
-          const silent = !isRecipeAsk(text);
-          const found = await lookup(text, undefined, silent);
-          if (!found && silent) {
-            setPhase("capturing");
-            setStatusLine("Listening.");
-            armCapture();
+        if (intent.type === "lookup") {
+          const found = await lookup(intent.query, intent.kindHint, true);
+          if (found) return;
+          if (isRecipeAsk(intent.query) || isRecipeAsk(text)) {
+            setPhase("listening");
+            setStatusLine(`I don't have ${intent.query} yet.`);
+            return;
           }
+          await converse(text);
+          return;
+        }
+
+        if ((capturing || fromTyped || woke) && text.length >= 2) {
+          const found = await lookup(text, undefined, true);
+          if (found) return;
+          await converse(text);
         }
       } finally {
         handling.current = false;
@@ -838,14 +1009,21 @@ export function useWinston() {
     [
       armCapture,
       clearCapture,
+      holdDuck,
       goBack,
-      goNext,
+      gotoStep,
+      readAllSteps,
       applyBatch,
+      converse,
       listSpeech,
       lookup,
       openSpec,
+      punchIn,
+      punchOut,
       readCurrent,
       resumeEar,
+      returnHome,
+      startRadio,
       speakAndWait,
       stopAudio,
     ],
@@ -868,28 +1046,65 @@ export function useWinston() {
       lastHeardAt.current = Date.now();
       if (pauseRec.current) return;
       const { finalText, live } = bestTranscript(event);
-      if (live) setInterim(live);
+      const armed =
+        phaseRef.current === "capturing" ||
+        phaseRef.current === "awaiting" ||
+        phaseRef.current === "thinking" ||
+        Boolean(activeRef.current);
+      const preview = `${holdBuf.current} ${live} ${finalText}`.trim();
+      const liveWoke = stripWake(preview).woke || stripWake(finalText).woke;
+      const listeningForCommand =
+        phaseRef.current === "capturing" || phaseRef.current === "awaiting";
+      if (liveWoke && currentStation()) {
+        setRadioDuck(true, 0.12);
+        holdBuf.current = "";
+      }
+      if (
+        currentStation() &&
+        !listeningForCommand &&
+        finalText &&
+        !stripWake(finalText).woke
+      ) {
+        return;
+      }
+      if (armed || liveWoke) {
+        if (live) setInterim(live);
+      } else if (live) {
+        setInterim("");
+      }
       if (!finalText) return;
       if (Date.now() < ignoreUntil.current && !stripWake(finalText).woke) return;
-      setHeard(finalText);
-      holdBuf.current = `${holdBuf.current} ${finalText}`.trim();
+      if (currentStation() && stripWake(finalText).woke) {
+        holdBuf.current = finalText.trim();
+      } else {
+        holdBuf.current = `${holdBuf.current} ${finalText}`.trim();
+      }
+      if (currentStation()) {
+        const words = holdBuf.current.split(/\s+/);
+        if (words.length > 12) holdBuf.current = words.slice(-12).join(" ");
+      }
       if (holdTimer.current) window.clearTimeout(holdTimer.current);
       const phraseNow = holdBuf.current;
-      const woke = stripWake(phraseNow).woke;
+      const wokeNow = stripWake(phraseNow).woke;
+      const specCue =
+        Boolean(activeRef.current) && /\b(steps?|repeat|close)\b/i.test(`${finalText} ${phraseNow}`);
       const shortCommand =
-        /^(next|repeat|stop|back|ingredients|half|double|full)[.!?]*$/i.test(finalText.trim()) &&
-        Boolean(activeRef.current);
+        specCue ||
+        (/^(steps|repeat|close|stop|next|back|ingredients|half|double|full)[.!?]*$/i.test(finalText.trim()) &&
+          Boolean(activeRef.current));
       const restWords = stripWake(phraseNow).rest.split(/\s+/).filter(Boolean).length;
       const capturing = phaseRef.current === "capturing" || phaseRef.current === "awaiting";
       const delay = shortCommand
         ? 80
-        : woke && restWords >= 2
-          ? 650
-          : woke
-            ? 800
-            : capturing
+        : wokeNow && currentStation()
+          ? 900
+          : wokeNow && restWords >= 2
+            ? 650
+            : wokeNow
               ? 500
-              : 320;
+              : capturing
+                ? 400
+                : 320;
       holdTimer.current = window.setTimeout(() => {
         const phrase = holdBuf.current.trim();
         holdBuf.current = "";
@@ -909,15 +1124,22 @@ export function useWinston() {
       lastHeardAt.current = Date.now();
     };
     rec.onend = () => {
+      nudgeRadio();
       if (!wantMic.current || pauseRec.current) return;
-      window.setTimeout(() => {
+      const restart = () => {
         if (!wantMic.current || pauseRec.current) return;
         try {
           rec.start();
         } catch {
           // already running
         }
-      }, 160);
+        nudgeRadio();
+      };
+      if (currentStation()) {
+        restart();
+        return;
+      }
+      window.setTimeout(restart, 160);
     };
     recRef.current = rec;
     return rec;
@@ -947,7 +1169,7 @@ export function useWinston() {
           Boolean((navigator as Navigator & { webdriver?: boolean }).webdriver);
         if (isFramed() || automation) {
           setNeedsUnlock(false);
-          setStatusLine("On your phone, Winston stays on. Say Hey Winston.");
+          setStatusLine("On your phone, Winston stays on. Say Winston.");
         } else {
           setNeedsUnlock(true);
           setStatusLine("Tap anywhere once so Winston can keep listening.");
@@ -955,6 +1177,8 @@ export function useWinston() {
         return;
       }
       setNeedsUnlock(false);
+      const nav = navigator as Navigator & { audioSession?: { type: string } };
+      if (nav.audioSession) nav.audioSession.type = "play-and-record";
       const rec = attachRecognizer();
       if (!rec) return;
       if (!pauseRec.current) {
@@ -970,6 +1194,7 @@ export function useWinston() {
         if (!wantMic.current) return;
         if (pauseRec.current) return;
         if (phaseRef.current === "speaking") return;
+        if (currentStation()) return;
         if (Date.now() - lastHeardAt.current < 12_000) return;
         try {
           recRef.current?.abort();
@@ -987,7 +1212,7 @@ export function useWinston() {
       }, 8000);
       setMicOn(true);
       setPhase("listening");
-      setStatusLine("Listening for Hey Winston.");
+      setStatusLine("Listening for Winston.");
       const lock = await requestWakeLock();
       if (lock) wakeLockRef.current = lock;
       if (!greetedRef.current) {
@@ -1118,7 +1343,7 @@ export function useWinston() {
         await ingestDriveFile(file);
       }
       if (!cancelled && phaseRef.current === "listening") {
-        setStatusLine("Listening for Hey Winston.");
+        setStatusLine("Listening for Winston.");
       }
     })();
     return () => {
@@ -1198,9 +1423,9 @@ export function useWinston() {
         const line =
           list.length === 1
             ? `That screenshot had ${added.length} cards: ${spokenList(names).replace(/^I have /, "")}`
-            : `Saved ${added.length} specs on this phone. Say Hey Winston, then ask for one.`;
+            : `Saved ${added.length} specs on this phone. Say Winston, then ask for one.`;
         await speak(line);
-        setStatusLine("Listening for Hey Winston.");
+        setStatusLine("Listening for Winston.");
         setPhase("listening");
       } catch (err) {
         const line = err instanceof Error ? err.message : "Upload failed. Try one photo at a time.";
@@ -1246,6 +1471,10 @@ export function useWinston() {
     busy,
     libraryOpen,
     setLibraryOpen,
+    radioOpen,
+    setRadioOpen,
+    hoursOpen,
+    setHoursOpen,
     ensureListening,
     unlockMic,
     askTyped,

@@ -1,18 +1,20 @@
 import type { Intent, SpecKind, VoiceCommand } from "./types";
+import { parseShiftTime } from "./hours";
+import { matchStation, spokenFreq, wantsRadioOff } from "./stations";
 
 const WAKE_NAME =
   "(?:win\\s*ston|winston|winson|winsten|winstin|winstan|whenston|whinston|winstone)";
 
 const WAKE_ONLY = new RegExp(
-  `^(?:ok(?:ay)?|hey+|hi+|hello|yo|hay)\\s+${WAKE_NAME}[.!?]*$`,
+  `^(?:(?:ok(?:ay)?|hey+|hi+|hello|yo|hay)\\s+)?${WAKE_NAME}[.!?]*$`,
   "i",
 );
 
 const HANDS_FREE: VoiceCommand[] = [
-  "next",
+  "steps",
   "repeat",
   "back",
-  "stop",
+  "close",
   "ingredients",
   "start-over",
   "half",
@@ -22,8 +24,8 @@ const HANDS_FREE: VoiceCommand[] = [
 
 const COMMANDS: { re: RegExp; command: VoiceCommand }[] = [
   {
-    re: /^(next|next step|what(?:'| i)?s next)[.!?]*$/i,
-    command: "next",
+    re: /^(steps|all steps|the steps|read(?:\s+(?:the|all))?\s+steps|next|next step|what(?:'| i)?s next)[.!?]*$/i,
+    command: "steps",
   },
   {
     re: /^(repeat|say that again|repeat that)[.!?]*$/i,
@@ -34,8 +36,8 @@ const COMMANDS: { re: RegExp; command: VoiceCommand }[] = [
     command: "back",
   },
   {
-    re: /^(stop|that's enough|never ?mind)[.!?]*$/i,
-    command: "stop",
+    re: /^(close(?:\s+(?:the\s+)?(?:spec|card|recipe|it))?|stop|that's enough|never ?mind)[.!?]*$/i,
+    command: "close",
   },
   {
     re: /^(ingredients|what do i need)[.!?]*$/i,
@@ -66,6 +68,51 @@ const COMMANDS: { re: RegExp; command: VoiceCommand }[] = [
 const FILLER =
   /^(please|can you|could you|would you|i (?:want|need)|tell me|read(?: me)?|give me|find(?: me)?|look up)\s+/i;
 
+const STEP_WORDS: Record<string, number> = {
+  one: 1,
+  two: 2,
+  three: 3,
+  four: 4,
+  five: 5,
+  six: 6,
+  seven: 7,
+  eight: 8,
+  nine: 9,
+  ten: 10,
+  eleven: 11,
+  twelve: 12,
+  first: 1,
+  second: 2,
+  third: 3,
+  fourth: 4,
+  fifth: 5,
+  sixth: 6,
+  seventh: 7,
+  eighth: 8,
+  ninth: 9,
+  tenth: 10,
+};
+
+function parseStepNumber(token: string): number | null {
+  const t = token.toLowerCase().replace(/(?:st|nd|rd|th)$/i, "");
+  if (/^\d+$/.test(t)) {
+    const n = Number(t);
+    return n > 0 ? n : null;
+  }
+  return STEP_WORDS[t] ?? null;
+}
+
+export function parseStepAsk(text: string): number | null {
+  const t = text.trim().replace(/\s+/g, " ").replace(/\?+$/, "");
+  const a = t.match(
+    /^(?:what(?:'| i)?s\s+)?(?:(?:read|say|tell me)\s+)?(?:step|the step)\s+(?:number\s+)?([a-z0-9]+)[.!?]*$/i,
+  );
+  if (a?.[1]) return parseStepNumber(a[1]);
+  const b = t.match(/^(?:the\s+)?([a-z0-9]+)\s+step[.!?]*$/i);
+  if (b?.[1]) return parseStepNumber(b[1]);
+  return null;
+}
+
 export function foldHeard(text: string): string {
   return text
     .trim()
@@ -87,25 +134,78 @@ export function stripWake(text: string): { woke: boolean; rest: string } {
   if (WAKE_ONLY.test(trimmed)) {
     return { woke: true, rest: "" };
   }
-  const anywhere = new RegExp(
-    `(?:^|\\s)(?:ok(?:ay)?|hey+|hi+|hello|yo|hay)\\s+${WAKE_NAME}\\b[,.!?]*\\s*`,
+  const atStart = new RegExp(
+    `^(?:(?:ok(?:ay)?|hey+|hi+|hello|yo|hay|um+|uh+|so)\\s+)*${WAKE_NAME}\\b[,.!?]*\\s*`,
     "i",
   );
-  const match = anywhere.exec(trimmed);
-  if (match && match.index !== undefined) {
-    const rest = trimmed.slice(match.index + match[0].length).trim();
+  const match = atStart.exec(trimmed);
+  if (match) {
+    const rest = trimmed.slice(match[0].length).trim();
     return { woke: true, rest };
   }
+  const buried = trimmed.match(new RegExp(`\\b${WAKE_NAME}\\b[,.!?]*\\s*(.*)$`, "i"));
+  if (buried) {
+    return { woke: true, rest: (buried[1] ?? "").trim() };
+  }
   return { woke: false, rest: trimmed };
+}
+
+/** Pull a spec command out of a noisy line, such as radio talk around "steps". */
+export function looseSpecCommand(text: string): Intent | null {
+  const t = text.trim().replace(/\s+/g, " ");
+  if (!t) return null;
+  const step = parseStepAsk(t) ?? parseStepAsk(t.replace(/^.*\b(?:winston|winson|winsten)\b/i, "").trim());
+  if (step) return { type: "goto-step", n: step };
+  if (/\b((?:read|say)\s+(?:me\s+)?)?(?:the\s+|all\s+(?:the\s+)?)?steps\b/i.test(t)) {
+    return { type: "command", command: "steps" };
+  }
+  if (/\brepeat\b/i.test(t) && t.split(/\s+/).length <= 6) {
+    return { type: "command", command: "repeat" };
+  }
+  if (/\b(close|stop)\b/i.test(t) && /\b(spec|card|recipe|it|that)\b/i.test(t)) {
+    return { type: "command", command: "close" };
+  }
+  if (/^(close|stop)[.!?]*$/i.test(t)) return { type: "command", command: "close" };
+  return null;
 }
 
 export function parseIntent(text: string): Intent {
   let rest = text.trim().replace(/\s+/g, " ");
   if (!rest) return { type: "unknown", raw: text };
 
+  if (wantsRadioOff(rest)) return { type: "radio-stop" };
+  if (
+    /^(?:play|put on|turn on|start)(?:\s+(?:the|some))?\s+radio[.!?]*$/i.test(rest) ||
+    /^radio[.!?]*$/i.test(rest)
+  ) {
+    return { type: "radio", query: "" };
+  }
+  const tuned = rest.match(/^(?:play|put on|tune(?:\s+to)?|start)\s+(.+?)[.!?]*$/i);
+  if (tuned?.[1] && (matchStation(tuned[1]) || spokenFreq(tuned[1]))) {
+    return { type: "radio", query: tuned[1] };
+  }
+  const clockedIn = rest.match(/^(?:clock|punch|check)\s*in(?:\s+(?:for|at|to|around))?\s*(.*?)[.!?]*$/i);
+  if (clockedIn) {
+    const said = (clockedIn[1] ?? "").trim();
+    const at = said ? parseShiftTime(said) : null;
+    return { type: "clock-in", at, missed: Boolean(said) && at == null };
+  }
+  const clockedOut = rest.match(/^(?:clock|punch|check)\s*out(?:\s+(?:for|at|to|around))?\s*(.*?)[.!?]*$/i);
+  if (clockedOut) {
+    const said = (clockedOut[1] ?? "").trim();
+    const at = said ? parseShiftTime(said) : null;
+    return { type: "clock-out", at, missed: Boolean(said) && at == null };
+  }
+  if (/^(?:my hours|show(?: me)?(?: my)? hours|time\s*sheet|timesheet|hours)[.!?]*$/i.test(rest)) {
+    return { type: "hours" };
+  }
+
   for (const { re, command } of COMMANDS) {
     if (re.test(rest)) return { type: "command", command };
   }
+
+  const stepNow = parseStepAsk(rest);
+  if (stepNow) return { type: "goto-step", n: stepNow };
 
   rest = rest.replace(FILLER, "").trim();
 
@@ -133,6 +233,9 @@ export function parseIntent(text: string): Intent {
     if (hit) return { type: "command", command: hit.command };
   }
 
+  const stepLater = parseStepAsk(stripped);
+  if (stepLater) return { type: "goto-step", n: stepLater };
+
   if (stripped.length < 3) return { type: "unknown", raw: text };
 
   return { type: "lookup", query: stripped, kindHint };
@@ -141,12 +244,9 @@ export function parseIntent(text: string): Intent {
 export function isRecipeAsk(text: string) {
   const t = text.toLowerCase().trim();
   if (!t) return false;
-  if (/\b(recipe|procedure|process|spec|card|ingredients)\b/.test(t)) return true;
-  if (/\b(i|you|we|yeah|yep|okay|ok|just|like|um+|uh+|hmm+)\b/.test(t) && t.split(/\s+/).length > 6) {
-    return false;
-  }
-  const words = t.split(/\s+/).filter((w) => w.length > 2);
-  return words.length >= 2 && words.length <= 8;
+  return /\b(recipe|procedure|process|spec sheet|spec card|\bcards?\b|ingredients|how do i make|how to make|how do i cook|how to cook)\b/.test(
+    t,
+  );
 }
 
 export function spokenList(titles: string[]): string {

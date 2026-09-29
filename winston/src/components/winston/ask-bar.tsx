@@ -20,7 +20,7 @@ export function AskBar({
 
   return (
     <form
-      className="flex items-center gap-2 rounded-xl bg-surface p-1.5 shadow-[var(--shadow-border)]"
+      className="flex items-center gap-1.5 rounded-lg bg-surface/80 p-1 shadow-[var(--shadow-border)] backdrop-blur-sm"
       onSubmit={(e) => {
         e.preventDefault();
         submit();
@@ -33,17 +33,18 @@ export function AskBar({
         id="winston-ask"
         value={value}
         onChange={(e) => setValue(e.target.value)}
-        placeholder="Ask for a recipe or process"
+        placeholder="Ask Winston"
         disabled={disabled}
-        className="h-11 min-w-0 flex-1 bg-transparent px-3 text-base text-fg outline-none placeholder:text-subtle"
+        className="h-8 min-w-0 flex-1 bg-transparent px-2.5 text-sm text-fg outline-none placeholder:text-subtle"
       />
       <Button
         type="submit"
         size="icon"
         disabled={disabled || !value.trim()}
         aria-label="Ask"
+        className="size-8 rounded-md"
       >
-        <ArrowUp />
+        <ArrowUp className="size-3.5" />
       </Button>
     </form>
   );

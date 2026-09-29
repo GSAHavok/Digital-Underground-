@@ -1,4 +1,4 @@
-import { ChevronLeft, ChevronRight, Pause, Play } from "lucide-react";
+import { Pause, Play } from "lucide-react";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { PhotoLightbox } from "@/components/winston/photo-lightbox";
@@ -147,20 +147,15 @@ export function RecipePanel({
       ) : null}
 
       <div className="mt-5 grid grid-cols-2 gap-2 sm:grid-cols-4">
-        <Button variant="outline" onClick={onBack}>
-          <ChevronLeft />
-          Back
-        </Button>
         <Button variant="outline" onClick={onRepeat}>
           {speaking ? <Pause /> : <Play />}
           Repeat
         </Button>
-        <Button variant="outline" onClick={onRead}>
-          Read
-        </Button>
         <Button variant="primary" onClick={onNext}>
-          Next
-          <ChevronRight />
+          Steps
+        </Button>
+        <Button variant="outline" onClick={onStop}>
+          Close
         </Button>
       </div>
       <div className="mt-3 grid grid-cols-2 gap-2">
@@ -169,7 +164,7 @@ export function RecipePanel({
           onClick={onStop}
           className="py-2 text-center text-sm text-muted"
         >
-          Stop reading
+          Close spec
         </button>
         <button
           type="button"

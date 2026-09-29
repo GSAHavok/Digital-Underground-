@@ -385,3 +385,86 @@ export const speakText = createServerFn({ method: "POST" })
       audioBase64: buf.toString("base64"),
     };
   });
+
+export const askWinston = createServerFn({ method: "POST" })
+  .validator(
+    (input: {
+      question: string;
+      history?: { role: "user" | "winston"; text: string }[];
+      specs?: string[];
+      nowIso?: string;
+      timeZone?: string;
+    }) => input,
+  )
+  .handler(async ({ data }) => {
+    const question = data.question.trim().slice(0, 800);
+    if (!question) return { ok: false as const, error: "empty" };
+    const specs = (data.specs ?? []).filter(Boolean).slice(0, 40);
+    const specLine =
+      specs.length > 0
+        ? `The user's saved spec cards: ${specs.join("; ")}.`
+        : "The user has not loaded spec cards yet.";
+    const history = (data.history ?? []).slice(-8).map((turn) => ({
+      role: turn.role === "winston" ? ("assistant" as const) : ("user" as const),
+      content: turn.text.slice(0, 900),
+    }));
+    const zone = data.timeZone?.trim() || "America/Toronto";
+    const stamp = data.nowIso ? new Date(data.nowIso) : new Date();
+    const clock = new Intl.DateTimeFormat("en-CA", {
+      timeZone: zone,
+      weekday: "long",
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+      hour12: true,
+      timeZoneName: "short",
+    }).format(Number.isNaN(stamp.getTime()) ? new Date() : stamp);
+    const system = `You are Winston, a highly capable voice attendant. You speak out loud to one person.
+
+You have a clock and you know the time. Current local time: ${clock} (${zone}).
+If they ask the time, date, or day, say it plainly. Never say you lack a clock, calendar, internet, or information.
+
+You answer almost any question: time, weather, news, cooking, kitchen specs, how-tos, math, conversions, science, history, judgment, planning, and ordinary conversation. Be accurate. Use live search for weather, news, scores, and anything that changes.
+
+You also keep their spec cards. ${specLine}
+If they ask for a saved recipe or procedure, prefer those cards. If they do not have it, say so briefly, then help from knowledge if useful.
+
+Voice: dry, precise, spoken English. No markdown, no asterisks, no emoji, no headings, no bullet points. Short sentences. If you must list, say first, second, third.
+Stay under 120 words unless they ask for more.
+Never say you are an AI, a language model, or Grok unless they ask what you are. Then you are Winston.
+Do not ask them to tap buttons. They talk to you.
+Do not roleplay being limited. If you can answer, answer.`;
+
+    const attempt = async (withSearch: boolean) => {
+      const apiKey = process.env.XAI_API_KEY;
+      if (!apiKey) return { ok: false as const, error: "offline" };
+      const payload: Record<string, unknown> = {
+        model: "grok-4.5",
+        max_tokens: 700,
+        temperature: 0.55,
+        messages: [{ role: "system", content: system }, ...history, { role: "user", content: question }],
+      };
+      if (withSearch) payload.search_parameters = { mode: "auto" };
+      const res = await fetch("https://api.x.ai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) return { ok: false as const, error: `xAI API error ${res.status}` };
+      const body = (await res.json()) as {
+        choices?: { message?: { content?: string } }[];
+      };
+      const text = (body.choices?.[0]?.message?.content ?? "").trim();
+      if (!text) return { ok: false as const, error: "empty" };
+      return { ok: true as const, text };
+    };
+
+    const first = await attempt(true);
+    if (first.ok) return first;
+    return attempt(false);
+  });
